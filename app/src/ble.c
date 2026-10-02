@@ -71,6 +71,8 @@ BUILD_ASSERT(
     DEVICE_NAME_LEN <= CONFIG_BT_DEVICE_NAME_MAX,
     "ERROR: BLE device name is too long. Max length: " STRINGIFY(CONFIG_BT_DEVICE_NAME_MAX));
 
+static void ble_refresh_device_name(void);
+
 static struct bt_data zmk_ble_ad[] = {
     BT_DATA_BYTES(BT_DATA_GAP_APPEARANCE, 0xC1, 0x03),
     BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
@@ -301,6 +303,9 @@ int zmk_ble_prof_select(uint8_t index) {
     active_profile = index;
     ble_save_profile();
 
+    /* Keep the advertised name in sync with the selected slot. */
+    ble_refresh_device_name();
+
     update_advertising();
 
     raise_profile_changed_event();
@@ -358,6 +363,27 @@ struct bt_conn *zmk_ble_active_profile_conn(void) {
 }
 
 char *zmk_ble_active_profile_name(void) { return profiles[active_profile].name; }
+
+
+/*
+ * Advertised name carries the active profile slot, e.g. "offsetkey-3".
+ *
+ * The keyboard can be bonded to several hosts; which slot a new device will
+ * land in is decided by the *currently selected* profile. Advertising the
+ * plain name left the user with no way to tell which slot a device was about
+ * to pair into, so the 1-based slot number is appended.
+ *
+ * zmk_ble_set_device_name() already handles stopping and restarting
+ * advertising so the new name is picked up.
+ */
+static void ble_refresh_device_name(void) {
+    char name[CONFIG_BT_DEVICE_NAME_MAX + 1];
+
+    snprintf(name, sizeof(name), "%s-%u", CONFIG_BT_DEVICE_NAME,
+             (unsigned int)(active_profile + 1));
+
+    zmk_ble_set_device_name(name);
+}
 
 int zmk_ble_set_device_name(char *name) {
     // Copy new name to advertising parameters
@@ -732,6 +758,10 @@ static int zmk_ble_complete_startup(void) {
     bt_conn_cb_register(&conn_callbacks);
     bt_conn_auth_cb_register(&zmk_ble_auth_cb_display);
     bt_conn_auth_info_cb_register(&zmk_ble_auth_info_cb_display);
+
+    /* Settings are loaded by now, so active_profile is final: make the
+       advertised name match the restored slot. */
+    ble_refresh_device_name();
 
     zmk_ble_ready(0);
 
