@@ -297,7 +297,16 @@ int zmk_rgb_underglow_get_state(bool *on_off) {
     return 0;
 }
 
-int zmk_rgb_underglow_on(void) {
+/*
+ * reset_animation: only true for a user-initiated "RGB on".
+ *
+ * Turning the light back on after the idle auto-off must NOT reset
+ * animation_step: ZMK sleeps the underglow after CONFIG_ZMK_IDLE_TIMEOUT
+ * and wakes it on the next keypress, so resetting here made every effect
+ * visibly restart from the beginning each time the user resumed typing -
+ * which reads as "my effect/state was lost".
+ */
+static int rgb_underglow_turn_on(bool reset_animation) {
     if (!led_strip)
         return -ENODEV;
 
@@ -311,11 +320,15 @@ int zmk_rgb_underglow_on(void) {
 #endif
 
     state.on = true;
-    state.animation_step = 0;
+    if (reset_animation) {
+        state.animation_step = 0;
+    }
     k_timer_start(&underglow_tick, K_NO_WAIT, K_MSEC(50));
 
     return zmk_rgb_underglow_save_state();
 }
+
+int zmk_rgb_underglow_on(void) { return rgb_underglow_turn_on(true); }
 
 static void zmk_rgb_underglow_off_handler(struct k_work *work) {
     for (int i = 0; i < STRIP_NUM_PIXELS; i++) {
@@ -481,7 +494,8 @@ static int rgb_underglow_auto_state(bool target_wake_state) {
 
     if (sleep_state.is_awake) {
         if (sleep_state.rgb_state_before_sleeping) {
-            return zmk_rgb_underglow_on();
+            /* waking up from idle auto-off: keep the animation where it was */
+            return rgb_underglow_turn_on(false);
         } else {
             return zmk_rgb_underglow_off();
         }
