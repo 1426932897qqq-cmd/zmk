@@ -27,6 +27,41 @@ static bool handling_rx = false;
 
 static atomic_t notify_size;
 
+/*
+ * Reply to whoever asked.
+ *
+ * The original implementation always sent the response to
+ * zmk_ble_active_profile_conn(), i.e. the currently *active* profile.
+ * ZMK keeps several hosts connected at once and only one of them is
+ * "active" (the one keystrokes are routed to). As a result, a request
+ * coming from a connected-but-not-active host was processed, but its
+ * response was delivered to the active host instead - so the requester
+ * never saw a reply.
+ *
+ * Fix: remember the connection each request arrived on, and send the
+ * response back on that same connection.
+ */
+static struct bt_conn *rpc_requester;
+
+static void set_requester(struct bt_conn *conn) {
+    if (rpc_requester == conn) {
+        return;
+    }
+    if (rpc_requester) {
+        bt_conn_unref(rpc_requester);
+    }
+    rpc_requester = conn ? bt_conn_ref(conn) : NULL;
+}
+
+/* Returns a connection reference the caller owns (must bt_conn_unref()).
+ * Falls back to the old behaviour when no requester is recorded. */
+static struct bt_conn *take_requester_ref(void) {
+    if (rpc_requester) {
+        return bt_conn_ref(rpc_requester);
+    }
+    return zmk_ble_active_profile_conn();
+}
+
 static void rpc_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value) {
     ARG_UNUSED(attr);
 
@@ -80,6 +115,9 @@ static ssize_t write_rpc_req(struct bt_conn *conn, const struct bt_gatt_attr *at
         ring_buf_put_finish(rpc_buf, claim_len);
     }
 
+    /* Remember who asked, so the response can go back to the same host. */
+    set_requester(conn);
+
     zmk_rpc_rx_notify();
 
     return len;
@@ -104,7 +142,9 @@ static uint16_t get_notify_size_for_conn(struct bt_conn *conn) {
 }
 
 static void refresh_notify_size(void) {
-    struct bt_conn *conn = zmk_ble_active_profile_conn();
+    /* Size the chunks for the connection that asked: that is where the
+       response goes, so its MTU is the one that matters. */
+    struct bt_conn *conn = take_requester_ref();
 
     uint16_t ns = get_notify_size_for_conn(conn);
     if (conn) {
@@ -122,6 +162,7 @@ static int gatt_start_rx() {
 
 static int gatt_stop_rx(void) {
     handling_rx = false;
+    set_requester(NULL);
     return 0;
 }
 
@@ -130,11 +171,14 @@ static struct bt_gatt_indicate_params rpc_indicate_params = {
 };
 
 static void notif_rpc_tx_cb(struct k_work *work) {
-    struct bt_conn *conn = zmk_ble_active_profile_conn();
+    /* KEY CHANGE: send the response back to the connection that made the
+       request, not to the active profile. Otherwise a host that is
+       connected but not active never receives its reply. */
+    struct bt_conn *conn = take_requester_ref();
     struct ring_buf *tx_buf = zmk_rpc_get_tx_buf();
 
     if (!conn) {
-        LOG_WRN("No active connection for queued data, dropping");
+        LOG_WRN("No connection to send the response to, dropping");
         ring_buf_reset(tx_buf);
         return;
     }
