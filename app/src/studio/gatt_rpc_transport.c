@@ -170,49 +170,6 @@ static struct bt_gatt_indicate_params rpc_indicate_params = {
     .attr = &rpc_interface.attrs[1],
 };
 
-/*
- * Also send a copy to the currently active connection.
- *
- * "Reply to whoever asked" covers the host that made the request. But a host
- * that is connected and merely not active still benefits from seeing the
- * device state - and, more to the point, the user asked for the keyboard to
- * report to every connected device, not just the one being typed on.
- *
- * A peer that has not enabled the Studio notification characteristic will
- * simply reject the indication; that is expected and harmless, so failures
- * are only logged at debug level. The requesting host has already been
- * served above, so a failure here can never break the normal path.
- */
-static void rpc_broadcast_to_others(const uint8_t *data, uint16_t len,
-                                    struct bt_conn *requester) {
-    struct bt_conn *active = zmk_ble_active_profile_conn();
-
-    if (!active) {
-        return;
-    }
-    if (active == requester) {      /* already sent to it */
-        bt_conn_unref(active);
-        return;
-    }
-
-    /* Separate params object: the requester's indication may still be in
-     * flight, and Zephyr keeps a pointer to the params until it completes. */
-    static struct bt_gatt_indicate_params bcast_params;
-
-    bcast_params.attr = &rpc_interface.attrs[1];
-    bcast_params.data = data;
-    bcast_params.len = len;
-    bcast_params.func = NULL;
-
-    int err = bt_gatt_indicate(active, &bcast_params);
-    if (err < 0) {
-        LOG_DBG("broadcast to the other connection failed (%d); "
-                "it probably has no Studio notifications enabled", err);
-    }
-
-    bt_conn_unref(active);
-}
-
 static void notif_rpc_tx_cb(struct k_work *work) {
     /* KEY CHANGE: send the response back to the connection that made the
        request, not to the active profile. Otherwise a host that is
@@ -254,10 +211,6 @@ static void notif_rpc_tx_cb(struct k_work *work) {
             LOG_WRN("Failed to notify the response %d", err);
             k_sleep(K_MSEC(200));
         } while (notify_attempts-- > 0);
-
-        /* Also send a copy to the other connected peers (the requester
-           was already served above). */
-        rpc_broadcast_to_others(notify_bytes, added, conn);
     }
 
     bt_conn_unref(conn);
